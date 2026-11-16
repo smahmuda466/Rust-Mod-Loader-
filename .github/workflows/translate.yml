@@ -1,0 +1,80 @@
+name: Translate Fabric JAR to Horizon (.hnmod)
+
+on:
+  push:
+    paths:
+      - 'input-jars/*.jar'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 1. Checkout Your Translator Repo
+        uses: actions/checkout@v4
+
+      - name: 2. Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: 3. Clone Horizon-Translator and Horizon Source
+        run: |
+          git clone --depth 1 https://github.com/merenotnoonereal/Horizon-Translator.git translator-src
+          git clone --depth 1 https://github.com/horizon-rust/horizon.git horizon-src
+
+      - name: 4. Build horizon-port.jar CLI Tool
+        run: |
+          cd translator-src/mod-converter
+          chmod +x gradlew 2>/dev/null || true
+          if [ -f "./gradlew" ]; then
+            ./gradlew jar
+          else
+            gradle jar
+          fi
+
+      - name: 5. Convert & Pack All JARs in input-jars/
+        run: |
+          mkdir -p artifacts-out
+          PORT_JAR=$(find translator-src/mod-converter -name "horizon-port*.jar" | head -n 1)
+
+          if [ -z "$PORT_JAR" ]; then
+            echo "Error: horizon-port.jar was not built."
+            exit 1
+          fi
+
+          shopt -s nullglob
+          for jar in input-jars/*.jar; do
+            mod_name=$(basename "$jar" .jar)
+            echo "=== Translating $mod_name ==="
+
+            # Step A: Port Java Fabric bytecode -> Rust bundle + PORTING.md
+            java -jar "$PORT_JAR" port "$jar" \
+              --horizon-src horizon-src \
+              --out "work/$mod_name" || true
+
+            # Step B: Pack into .hnmod (with --no-check so partial ports still pack for inspection)
+            if [ -d "work/$mod_name" ]; then
+              java -jar "$PORT_JAR" pack "work/$mod_name" \
+                --horizon-src horizon-src \
+                --no-check || true
+
+              # Copy generated .hnmod, PORTING.md, and Rust files to output folder
+              mkdir -p "artifacts-out/$mod_name"
+              cp -r "work/$mod_name"/* "artifacts-out/$mod_name/" 2>/dev/null || true
+              find . -maxdepth 3 -name "*.hnmod" -exec cp {} "artifacts-out/$mod_name/" \; 2>/dev/null || true
+            fi
+          done
+
+      - name: 6. Upload Translated .hnmod & PORTING.md Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: translated-hnmods-${{ github.run_number }}
+          path: artifacts-out/
+          if-no-files-found: warn
+          
